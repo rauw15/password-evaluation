@@ -12,6 +12,7 @@ import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import logging
+from difflib import SequenceMatcher
 
 # Configurar logging sin exponer contraseñas
 logging.basicConfig(
@@ -103,6 +104,68 @@ def calculate_entropy(password):
     entropy = L * math.log2(N)
     return round(entropy, 2)
 
+def calculate_similarity(str1, str2):
+    """
+    Calcula la similitud entre dos strings usando SequenceMatcher
+    
+    Args:
+        str1 (str): Primer string
+        str2 (str): Segundo string
+        
+    Returns:
+        float: Similitud entre 0.0 y 1.0 (1.0 = idénticos)
+    """
+    return SequenceMatcher(None, str1.lower(), str2.lower()).ratio()
+
+def find_similar_passwords(password, threshold=0.8):
+    """
+    Encuentra contraseñas similares en el diccionario
+    
+    Args:
+        password (str): Contraseña a evaluar
+        threshold (float): Umbral de similitud (0.0 a 1.0)
+        
+    Returns:
+        list: Lista de contraseñas similares encontradas
+    """
+    similar_passwords = []
+    password_lower = password.lower()
+    
+
+    if password_lower in COMMON_PASSWORDS:
+        return [password_lower]
+    
+
+
+    symbols = ['!', '@', '#', '$', '%', '&', '*', '?', '.', '1', '2', '3', '123']
+    for symbol in symbols:
+        without_symbol = password_lower.rstrip(symbol)
+        if without_symbol in COMMON_PASSWORDS and without_symbol != password_lower:
+            similar_passwords.append(without_symbol)
+        
+        with_symbol = password_lower + symbol
+        if with_symbol in COMMON_PASSWORDS:
+            similar_passwords.append(with_symbol)
+    
+    for i in range(10):
+        without_number = password_lower.rstrip(str(i))
+        if without_number in COMMON_PASSWORDS and without_number != password_lower:
+            similar_passwords.append(without_number)
+        
+        with_number = password_lower + str(i)
+        if with_number in COMMON_PASSWORDS:
+            similar_passwords.append(with_number)
+    
+    if not similar_passwords:
+        for common_pass in COMMON_PASSWORDS:
+            similarity = calculate_similarity(password_lower, common_pass)
+            if similarity >= threshold:
+                similar_passwords.append(common_pass)
+                if len(similar_passwords) >= 3:
+                    break
+    
+    return list(set(similar_passwords))  
+
 def check_password_strength(password, entropy):
     """
     Evalúa la fuerza de la contraseña basada en entropía y otros factores
@@ -125,19 +188,25 @@ def check_password_strength(password, entropy):
         strength_category = "Muy Fuerte"
         security_level = "Alta"
     
-    # Verificación contra diccionario de contraseñas comunes
+    # Verificación contra diccionario de contraseñas comunes y similares
+    similar_passwords = find_similar_passwords(password)
     is_common = password.lower() in COMMON_PASSWORDS
+    is_similar = len(similar_passwords) > 0
     
-    # Penalización por contraseña común
+    # Penalización por contraseña común o similar
     if is_common:
         strength_category = "Muy Débil"
         security_level = "Muy Baja"
         entropy_penalized = entropy * 0.1
+    elif is_similar:
+        strength_category = "Débil"
+        security_level = "Muy Baja"
+        entropy_penalized = entropy * 0.3
     else:
         entropy_penalized = entropy
     
     # Tiempo estimado de crackeo (asumiendo 10^11 intentos/segundo)
-    attack_rate = 10**11  # intentos por segundo
+    attack_rate = 10**11
     total_combinations = 2**entropy_penalized
     time_to_crack_seconds = total_combinations / attack_rate
     
@@ -159,19 +228,22 @@ def check_password_strength(password, entropy):
         "strength_category": strength_category,
         "security_level": security_level,
         "is_common_password": is_common,
+        "is_similar_password": is_similar,
+        "similar_passwords_found": similar_passwords[:3],  # Máximo 3 para no sobrecargar
         "entropy_bits": entropy,
         "entropy_after_penalties": round(entropy_penalized, 2),
         "time_to_crack": time_to_crack,
-        "recommendations": _get_recommendations(entropy, is_common, password)
+        "recommendations": _get_recommendations(entropy, is_common, is_similar, password)
     }
 
-def _get_recommendations(entropy, is_common, password):
+def _get_recommendations(entropy, is_common, is_similar, password):
     """
     Genera recomendaciones para mejorar la contraseña
     
     Args:
         entropy (float): Entropía de la contraseña
         is_common (bool): Si es una contraseña común
+        is_similar (bool): Si es similar a una contraseña común
         password (str): La contraseña original
         
     Returns:
@@ -180,7 +252,13 @@ def _get_recommendations(entropy, is_common, password):
     recommendations = []
     
     if is_common:
+        recommendations.append("Esta contraseña está en el diccionario de contraseñas comunes")
         recommendations.append("Evite usar contraseñas comunes del diccionario")
+    
+    if is_similar:
+        recommendations.append("Esta contraseña es similar a contraseñas comunes")
+        recommendations.append("No basta con añadir/quitar símbolos o números a contraseñas débiles")
+        recommendations.append("Use palabras aleatorias o frases únicas")
     
     if entropy < 60:
         recommendations.append("Aumente la longitud de la contraseña")
@@ -202,7 +280,7 @@ def _get_recommendations(entropy, is_common, password):
         recommendations.append("Incluya símbolos especiales")
     
     if len(recommendations) == 0:
-        recommendations.append("Excelente! Su contraseña cumple con los estándares de seguridad")
+        recommendations.append("✅ Excelente! Su contraseña cumple con los estándares de seguridad")
     
     return recommendations
 
@@ -225,6 +303,8 @@ def evaluate_password():
                 "strength_category": "string",
                 "security_level": "string",
                 "is_common_password": bool,
+                "is_similar_password": bool,
+                "similar_passwords_found": ["string"],
                 "entropy_after_penalties": float,
                 "time_to_crack": "string",
                 "recommendations": ["string"]
